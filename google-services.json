@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "960019778061",
+    "project_id": "padma-rms-45eb3",
+    "storage_bucket": "padma-rms-45eb3.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:960019778061:android:9f14973b31f3131156a344",
+        "android_client_info": {
+          "package_name": "com.padma.rms"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAQ_LWQx8OP5CE1Ot7gH3pEBFxA7NDgSbI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
