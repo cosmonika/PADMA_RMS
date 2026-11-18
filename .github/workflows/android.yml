@@ -1,1 +1,143 @@
 
+name: Build PADMA RMS Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Get project files
+        uses: actions/checkout@v5
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+          accept-android-sdk-licenses: true
+
+      - name: Install Python image library
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pil
+
+      - name: Install project dependencies
+        run: npm install
+
+      - name: Check required files
+        run: |
+          test -f www/index.html
+          test -f padma.png
+          test -f google-services.json
+          test -f src/push-notifications.js
+          echo "PADMA RMS and Firebase configuration found."
+
+      - name: Prepare app icon and splash screen
+        run: |
+          mkdir -p assets www
+
+          python3 - <<'PY'
+          from PIL import Image
+
+          image = Image.open("padma.png").convert("RGBA")
+          icon = Image.new("RGBA", (1024, 1024), (255, 255, 255, 0))
+          image.thumbnail((900, 900))
+          x = (1024 - image.width) // 2
+          y = (1024 - image.height) // 2
+          icon.alpha_composite(image, (x, y))
+          icon.save("assets/icon.png")
+
+          logo = Image.open("padma.png").convert("RGBA")
+          logo.thumbnail((1200, 1200))
+          splash = Image.new("RGBA", (2732, 2732), "white")
+          x = (2732 - logo.width) // 2
+          y = (2732 - logo.height) // 2
+          splash.alpha_composite(logo, (x, y))
+          splash.convert("RGB").save("assets/splash.png")
+
+          print("Icon and splash images created.")
+          PY
+
+          cp padma.png www/padma.png
+
+      - name: Build push notification JavaScript
+        run: npm run build:push
+
+      - name: Create Android project
+        run: npx cap add android
+
+      - name: Copy Firebase Android configuration
+        run: |
+          mkdir -p android/app
+          cp google-services.json android/app/google-services.json
+          test -f android/app/google-services.json
+          echo "Firebase Android configuration copied."
+
+      - name: Generate Android icons and splash screen
+        run: npx capacitor-assets generate --android
+
+      - name: Configure Android screen bars
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          gradle_file = Path("android/variables.gradle")
+
+          if gradle_file.exists():
+              content = gradle_file.read_text()
+              updated, count = re.subn(
+                  r'targetSdkVersion\s*=\s*\d+',
+                  'targetSdkVersion = 34',
+                  content
+              )
+
+              if count:
+                  gradle_file.write_text(updated)
+                  print("Target SDK configured.")
+              else:
+                  print("Default target SDK retained.")
+          else:
+              print("Default Android SDK configuration retained.")
+          PY
+
+      - name: Sync PADMA RMS files and plugins
+        run: npx cap sync android
+
+      - name: Verify Firebase configuration
+        run: |
+          test -f android/app/google-services.json
+          grep -q '"package_name": "com.padma.rms"' android/app/google-services.json
+          echo "Firebase package name verified."
+
+      - name: Build Android APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PADMA-RMS-Android-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
