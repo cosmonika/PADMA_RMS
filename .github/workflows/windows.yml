@@ -104,9 +104,28 @@ jobs:
             });
 
             win.webContents.setWindowOpenHandler(({ url }) => {
+              // Allow the invoice preview popup created by window.open()
+              if (url === "about:blank") {
+                return {
+                  action: "allow",
+                  overrideBrowserWindowOptions: {
+                    width: 900,
+                    height: 750,
+                    autoHideMenuBar: true,
+                    webPreferences: {
+                      nodeIntegration: false,
+                      contextIsolation: true,
+                      sandbox: true
+                    }
+                  }
+                };
+              }
+
+              // Open normal external links in the system browser
               if (url.startsWith("https://") || url.startsWith("http://")) {
                 shell.openExternal(url);
               }
+
               return { action: "deny" };
             });
 
