@@ -49,7 +49,7 @@ jobs:
           test -f padma.png
           test -f google-services.json
           test -f src/push-notifications.js
-          echo "PADMA RMS and Firebase configuration found."
+          echo "PADMA RMS files found."
 
       - name: Prepare app icon and splash screen
         run: |
@@ -73,8 +73,6 @@ jobs:
           y = (2732 - logo.height) // 2
           splash.alpha_composite(logo, (x, y))
           splash.convert("RGB").save("assets/splash.png")
-
-          print("Icon and splash images created.")
           PY
 
           cp padma.png www/padma.png
@@ -85,12 +83,180 @@ jobs:
       - name: Create Android project
         run: npx cap add android
 
+      - name: Install native Android invoice printing
+        shell: bash
+        run: |
+          mkdir -p android/app/src/main/java/com/padma/rms
+
+          cat > android/app/src/main/java/com/padma/rms/MainActivity.java <<'JAVA'
+          package com.padma.rms;
+
+          import android.content.Context;
+          import android.graphics.Color;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.print.PrintAttributes;
+          import android.print.PrintManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+
+          import com.getcapacitor.BridgeActivity;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          public class MainActivity extends BridgeActivity {
+
+              private final List<WebView> printViews = new ArrayList<>();
+
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  WebView appWebView = bridge.getWebView();
+
+                  appWebView.addJavascriptInterface(
+                      new PadmaPrintBridge(this),
+                      "PadmaNativePrint"
+                  );
+
+                  installPrintHook(appWebView, 0);
+              }
+
+              private void installPrintHook(WebView webView, int attempt) {
+                  if (attempt >= 40) return;
+
+                  String script =
+                      "(function() {" +
+                      " if (document.readyState !== 'complete') return;" +
+                      " if (window.__padmaPrintHookInstalled) return;" +
+                      " if (!window.PadmaNativePrint) return;" +
+
+                      " window.__padmaPrintHookInstalled = true;" +
+
+                      " window.open = function() {" +
+                      "   var html = '';" +
+                      "   var printed = false;" +
+
+                      "   return {" +
+                      "     document: {" +
+                      "       write: function(content) {" +
+                      "         html += String(content);" +
+                      "       }," +
+                      "       close: function() {}" +
+                      "     }," +
+
+                      "     print: function() {" +
+                      "       if (printed || !html) return;" +
+                      "       printed = true;" +
+
+                      "       var match = html.match(/<title>([\\\\s\\\\S]*?)<\\\\/title>/i);" +
+                      "       var title = match ? match[1] : 'PADMA Invoice';" +
+
+                      "       window.PadmaNativePrint.printHtml(html, title);" +
+                      "     }" +
+                      "   };" +
+                      " };" +
+                      "})();";
+
+                  webView.evaluateJavascript(script, null);
+
+                  new Handler(Looper.getMainLooper()).postDelayed(
+                      () -> installPrintHook(webView, attempt + 1),
+                      300
+                  );
+              }
+
+              private class PadmaPrintBridge {
+
+                  private final Context context;
+
+                  PadmaPrintBridge(Context context) {
+                      this.context = context;
+                  }
+
+                  @JavascriptInterface
+                  public void printHtml(String html, String title) {
+                      if (html == null || html.isEmpty()) return;
+
+                      new Handler(Looper.getMainLooper()).post(() -> {
+                          WebView printWebView = new WebView(context);
+                          printWebView.setBackgroundColor(Color.WHITE);
+                          printWebView.getSettings().setJavaScriptEnabled(false);
+
+                          printViews.add(printWebView);
+
+                          printWebView.setWebViewClient(new WebViewClient() {
+                              private boolean started = false;
+
+                              @Override
+                              public void onPageFinished(WebView view, String url) {
+                                  if (started) return;
+                                  started = true;
+
+                                  PrintManager printManager =
+                                      (PrintManager) getSystemService(
+                                          Context.PRINT_SERVICE
+                                      );
+
+                                  if (printManager == null) return;
+
+                                  String safeTitle =
+                                      (title == null || title.trim().isEmpty())
+                                      ? "PADMA Invoice"
+                                      : title.replaceAll("[^a-zA-Z0-9_-]", "_");
+
+                                  android.print.PrintDocumentAdapter adapter =
+                                      view.createPrintDocumentAdapter(safeTitle);
+
+                                  PrintAttributes attributes =
+                                      new PrintAttributes.Builder()
+                                          .setMediaSize(
+                                              PrintAttributes.MediaSize.ISO_A4
+                                          )
+                                          .setResolution(
+                                              new PrintAttributes.Resolution(
+                                                  "padma",
+                                                  "PADMA RMS",
+                                                  300,
+                                                  300
+                                              )
+                                          )
+                                          .setMinMargins(
+                                              PrintAttributes.Margins.NO_MARGINS
+                                          )
+                                          .build();
+
+                                  printManager.print(
+                                      safeTitle,
+                                      adapter,
+                                      attributes
+                                  );
+                              }
+                          });
+
+                          printWebView.loadDataWithBaseURL(
+                              null,
+                              html,
+                              "text/html",
+                              "UTF-8",
+                              null
+                          );
+                      });
+                  }
+              }
+          }
+          JAVA
+
+          echo "Native Android invoice printing installed."
+
       - name: Copy Firebase Android configuration
         run: |
           mkdir -p android/app
           cp google-services.json android/app/google-services.json
           test -f android/app/google-services.json
-          echo "Firebase Android configuration copied."
 
       - name: Generate Android icons and splash screen
         run: npx capacitor-assets generate --android
@@ -129,6 +295,12 @@ jobs:
           grep -q '"package_name": "com.padma.rms"' android/app/google-services.json
           echo "Firebase package name verified."
 
+      - name: Verify native printing code
+        run: |
+          test -f android/app/src/main/java/com/padma/rms/MainActivity.java
+          grep -q 'PadmaNativePrint' android/app/src/main/java/com/padma/rms/MainActivity.java
+          echo "Android printing bridge found."
+
       - name: Build Android APK
         run: |
           cd android
@@ -141,3 +313,4 @@ jobs:
           name: PADMA-RMS-Android-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          retention-days: 14
