@@ -15,34 +15,41 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
+      # 1. Get project files
       - name: Get project files
         uses: actions/checkout@v5
 
+      # 2. Install Node.js
       - name: Install Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 22
 
+      # 3. Install Java
       - name: Install Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
 
+      # 4. Set up Android SDK
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
           packages: platform-tools
           accept-android-sdk-licenses: true
 
+      # 5. Install Python image library
       - name: Install Python image library
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-pil
 
+      # 6. Install dependencies
       - name: Install project dependencies
         run: npm install
 
+      # 7. Check required files
       - name: Check required files
         run: |
           test -f www/index.html
@@ -51,6 +58,7 @@ jobs:
           test -f src/push-notifications.js
           echo "PADMA RMS files found."
 
+      # 8. Prepare app icon and splash screen
       - name: Prepare app icon and splash screen
         run: |
           mkdir -p assets www
@@ -77,12 +85,63 @@ jobs:
 
           cp padma.png www/padma.png
 
+      # 9. Build push notification JavaScript
       - name: Build push notification JavaScript
         run: npm run build:push
 
+      # 10. Create Android project
       - name: Create Android project
         run: npx cap add android
 
+      # 11. Set up permanent Android signing key
+      - name: Set up permanent Android signing key
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.android"
+
+          if [ -f padma-debug.keystore ]; then
+            echo "Using existing permanent PADMA signing key."
+          else
+            echo "Creating initial PADMA signing key."
+
+            keytool -genkeypair \
+              -v \
+              -keystore padma-debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+          cp padma-debug.keystore "$HOME/.android/debug.keystore"
+
+          FINGERPRINT=$(keytool -list -v \
+            -keystore padma-debug.keystore \
+            -alias androiddebugkey \
+            -storepass android \
+            -keypass android |
+            grep SHA256: |
+            head -1 |
+            sed 's/.*SHA256: //')
+
+          if [ -z "$FINGERPRINT" ]; then
+            echo "Could not obtain signing fingerprint."
+            exit 1
+          fi
+
+          echo "PADMA_APP_LINK_SHA256=$FINGERPRINT" >> "$GITHUB_ENV"
+
+          echo "## PADMA App Links SHA-256" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "$FINGERPRINT" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Permanent signing key configured."
+
+      # 12. Install native Android invoice printing
       - name: Install native Android invoice printing
         shell: bash
         run: |
@@ -133,13 +192,11 @@ jobs:
                       " if (document.readyState !== 'complete') return;" +
                       " if (window.__padmaPrintHookInstalled) return;" +
                       " if (!window.PadmaNativePrint) return;" +
-
                       " window.__padmaPrintHookInstalled = true;" +
 
                       " window.open = function() {" +
                       "   var html = '';" +
                       "   var printed = false;" +
-
                       "   return {" +
                       "     document: {" +
                       "       write: function(content) {" +
@@ -147,14 +204,11 @@ jobs:
                       "       }," +
                       "       close: function() {}" +
                       "     }," +
-
                       "     print: function() {" +
                       "       if (printed || !html) return;" +
                       "       printed = true;" +
-
                       "       var match = html.match(/<title>([\\\\s\\\\S]*?)<\\\\/title>/i);" +
                       "       var title = match ? match[1] : 'PADMA Invoice';" +
-
                       "       window.PadmaNativePrint.printHtml(html, title);" +
                       "     }" +
                       "   };" +
@@ -252,16 +306,19 @@ jobs:
 
           echo "Native Android invoice printing installed."
 
+      # 13. Copy Firebase Android configuration
       - name: Copy Firebase Android configuration
         run: |
           mkdir -p android/app
           cp google-services.json android/app/google-services.json
           test -f android/app/google-services.json
 
+      # 14. Generate Android icons and splash screen
       - name: Generate Android icons and splash screen
         run: npx capacitor-assets generate --android
 
-      - name: Configure Android screen bars
+      # 15. Configure Android SDK
+      - name: Configure Android SDK
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -271,6 +328,7 @@ jobs:
 
           if gradle_file.exists():
               content = gradle_file.read_text()
+
               updated, count = re.subn(
                   r'targetSdkVersion\s*=\s*\d+',
                   'targetSdkVersion = 34',
@@ -286,27 +344,110 @@ jobs:
               print("Default Android SDK configuration retained.")
           PY
 
+      # 16. Sync PADMA RMS plugins
       - name: Sync PADMA RMS files and plugins
         run: npx cap sync android
 
+      # 17. Configure verified Android App Links
+      - name: Configure PADMA RMS verified App Links
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+
+          ET.register_namespace(
+              "android",
+              "http://schemas.android.com/apk/res/android"
+          )
+
+          android = "{http://schemas.android.com/apk/res/android}"
+
+          tree = ET.parse(manifest)
+          root = tree.getroot()
+
+          application = root.find("application")
+
+          if application is None:
+              raise SystemExit("Android application element not found.")
+
+          activity = None
+
+          for item in application.findall("activity"):
+              name = item.get(android + "name", "")
+
+              if name.endswith("MainActivity"):
+                  activity = item
+                  break
+
+          if activity is None:
+              raise SystemExit("MainActivity not found.")
+
+          intent = ET.SubElement(activity, "intent-filter")
+          intent.set(android + "autoVerify", "true")
+
+          action = ET.SubElement(intent, "action")
+          action.set(
+              android + "name",
+              "android.intent.action.VIEW"
+          )
+
+          category1 = ET.SubElement(intent, "category")
+          category1.set(
+              android + "name",
+              "android.intent.category.DEFAULT"
+          )
+
+          category2 = ET.SubElement(intent, "category")
+          category2.set(
+              android + "name",
+              "android.intent.category.BROWSABLE"
+          )
+
+          data = ET.SubElement(intent, "data")
+          data.set(android + "scheme", "https")
+          data.set(android + "host", "padma.cosmonika.com")
+
+          tree.write(
+              manifest,
+              encoding="utf-8",
+              xml_declaration=True
+          )
+
+          print("PADMA RMS verified App Links configured.")
+          PY
+
+      # 18. Verify Firebase configuration
       - name: Verify Firebase configuration
         run: |
           test -f android/app/google-services.json
           grep -q '"package_name": "com.padma.rms"' android/app/google-services.json
           echo "Firebase package name verified."
 
+      # 19. Verify native printing
       - name: Verify native printing code
         run: |
           test -f android/app/src/main/java/com/padma/rms/MainActivity.java
           grep -q 'PadmaNativePrint' android/app/src/main/java/com/padma/rms/MainActivity.java
           echo "Android printing bridge found."
 
+      # 20. Verify App Links
+      - name: Verify Android App Links
+        run: |
+          grep -q 'padma.cosmonika.com' android/app/src/main/AndroidManifest.xml
+          grep -q 'autoVerify' android/app/src/main/AndroidManifest.xml
+          echo "PADMA App Links verified in manifest."
+
+      # 21. Build Android APK
       - name: Build Android APK
         run: |
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon
 
+      # 22. Upload APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
@@ -314,3 +455,12 @@ jobs:
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
+
+      # 23. Save signing key for future builds
+      - name: Save permanent App Links signing key
+        uses: actions/upload-artifact@v4
+        with:
+          name: PADMA-App-Link-Signing-Key
+          path: padma-debug.keystore
+          if-no-files-found: error
+          retention-days: 90
