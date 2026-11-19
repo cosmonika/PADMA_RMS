@@ -1,1 +1,149 @@
 
+name: Build PADMA RMS Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Get project files
+        uses: actions/checkout@v5
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Check required files
+        shell: pwsh
+        run: |
+          if (!(Test-Path "www/index.html")) {
+            throw "www/index.html not found"
+          }
+
+          if (!(Test-Path "padma.ico")) {
+            throw "padma.ico not found"
+          }
+
+      - name: Prepare Windows application
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "windows-app" | Out-Null
+
+          Copy-Item -Path "www/*" -Destination "windows-app" -Recurse -Force
+          Copy-Item -Path "padma.ico" -Destination "windows-app/padma.ico" -Force
+
+          @'
+          {
+            "name": "padma-rms",
+            "version": "1.0.0",
+            "description": "PADMA RMS Retail Management Software",
+            "main": "main.cjs",
+            "author": "COSMONIKA PVT LTD",
+            "license": "UNLICENSED",
+            "scripts": {
+              "build:win": "electron-builder --win nsis --x64"
+            },
+            "devDependencies": {},
+            "build": {
+              "appId": "com.padma.rms",
+              "productName": "PADMA RMS",
+              "directories": {
+                "output": "dist"
+              },
+              "files": [
+                "**/*",
+                "!dist/**"
+              ],
+              "win": {
+                "target": [
+                  {
+                    "target": "nsis",
+                    "arch": ["x64"]
+                  }
+                ],
+                "icon": "padma.ico"
+              },
+              "nsis": {
+                "oneClick": false,
+                "allowToChangeInstallationDirectory": true,
+                "createDesktopShortcut": true,
+                "createStartMenuShortcut": true
+              }
+            }
+          }
+          '@ | Set-Content -Path "windows-app/package.json" -Encoding utf8
+
+          @'
+          const { app, BrowserWindow, shell } = require("electron");
+          const path = require("path");
+
+          function createWindow() {
+            const win = new BrowserWindow({
+              width: 1366,
+              height: 850,
+              minWidth: 900,
+              minHeight: 600,
+              title: "PADMA RMS",
+              icon: path.join(__dirname, "padma.ico"),
+              autoHideMenuBar: true,
+              webPreferences: {
+                nodeIntegration: false,
+                contextIsolation: true,
+                sandbox: true
+              }
+            });
+
+            win.webContents.setWindowOpenHandler(({ url }) => {
+              if (url.startsWith("https://") || url.startsWith("http://")) {
+                shell.openExternal(url);
+              }
+              return { action: "deny" };
+            });
+
+            win.loadFile(path.join(__dirname, "index.html"));
+          }
+
+          app.whenReady().then(() => {
+            createWindow();
+
+            app.on("activate", () => {
+              if (BrowserWindow.getAllWindows().length === 0) {
+                createWindow();
+              }
+            });
+          });
+
+          app.on("window-all-closed", () => {
+            if (process.platform !== "darwin") {
+              app.quit();
+            }
+          });
+          '@ | Set-Content -Path "windows-app/main.cjs" -Encoding utf8
+
+      - name: Install Electron and build tools
+        working-directory: windows-app
+        run: |
+          npm install --save-dev electron electron-builder
+
+      - name: Build Windows EXE
+        working-directory: windows-app
+        run: |
+          npm run build:win
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: PADMA-RMS-Windows-EXE
+          path: windows-app/dist/*.exe
+          if-no-files-found: error
+          retention-days: 14
