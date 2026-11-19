@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  build-windows:
+  build:
     runs-on: windows-latest
 
     steps:
@@ -27,33 +27,36 @@ jobs:
         shell: pwsh
         run: |
           if (!(Test-Path "www/index.html")) {
-            throw "www/index.html not found"
+            throw "www/index.html is missing"
           }
-
           if (!(Test-Path "padma.ico")) {
-            throw "padma.ico not found"
+            throw "padma.ico is missing"
           }
 
       - name: Prepare Windows application
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "windows-app" | Out-Null
+          New-Item -ItemType Directory -Force -Path windows-app | Out-Null
+          Copy-Item -Path "www/*" -Destination "windows-app/" -Recurse -Force
+          Copy-Item "padma.ico" "windows-app/padma.ico" -Force
 
-          Copy-Item -Path "www/*" -Destination "windows-app" -Recurse -Force
-          Copy-Item -Path "padma.ico" -Destination "windows-app/padma.ico" -Force
-
+      - name: Create Electron package
+        shell: pwsh
+        run: |
           @'
           {
             "name": "padma-rms",
             "version": "1.0.0",
-            "description": "PADMA RMS Retail Management Software",
+            "private": true,
+            "description": "PADMA RMS Offline Retail Management",
             "main": "main.cjs",
-            "author": "COSMONIKA PVT LTD",
-            "license": "UNLICENSED",
             "scripts": {
-              "build:win": "electron-builder --win nsis --x64"
+              "dist": "electron-builder --win nsis --x64"
             },
-            "devDependencies": {},
+            "devDependencies": {
+              "electron": "latest",
+              "electron-builder": "latest"
+            },
             "build": {
               "appId": "com.padma.rms",
               "productName": "PADMA RMS",
@@ -71,32 +74,42 @@ jobs:
                     "arch": ["x64"]
                   }
                 ],
-                "icon": "padma.ico"
+                "icon": "padma.ico",
+                "artifactName": "PADMA-RMS-Setup-${version}.${ext}"
               },
               "nsis": {
                 "oneClick": false,
                 "allowToChangeInstallationDirectory": true,
                 "createDesktopShortcut": true,
-                "createStartMenuShortcut": true
+                "createStartMenuShortcut": true,
+                "shortcutName": "PADMA RMS"
               }
             }
           }
-          '@ | Set-Content -Path "windows-app/package.json" -Encoding utf8
+          '@ | Set-Content -Path windows-app/package.json -Encoding UTF8
 
+      - name: Create Electron main process
+        shell: pwsh
+        run: |
           @'
-          const { app, BrowserWindow, shell } = require("electron");
+          const {
+            app,
+            BrowserWindow,
+            ipcMain,
+            shell
+          } = require("electron");
+
           const path = require("path");
+
+          const preloadPath = path.join(__dirname, "preload.cjs");
 
           function createWindow() {
             const win = new BrowserWindow({
-              width: 1366,
-              height: 850,
-              minWidth: 900,
-              minHeight: 600,
-              title: "PADMA RMS",
-              icon: path.join(__dirname, "padma.ico"),
+              width: 1400,
+              height: 900,
               autoHideMenuBar: true,
               webPreferences: {
+                preload: preloadPath,
                 nodeIntegration: false,
                 contextIsolation: true,
                 sandbox: true
@@ -104,15 +117,15 @@ jobs:
             });
 
             win.webContents.setWindowOpenHandler(({ url }) => {
-              // Allow the invoice preview popup created by window.open()
               if (url === "about:blank") {
                 return {
                   action: "allow",
                   overrideBrowserWindowOptions: {
                     width: 900,
-                    height: 750,
+                    height: 800,
                     autoHideMenuBar: true,
                     webPreferences: {
+                      preload: preloadPath,
                       nodeIntegration: false,
                       contextIsolation: true,
                       sandbox: true
@@ -121,8 +134,8 @@ jobs:
                 };
               }
 
-              // Open normal external links in the system browser
-              if (url.startsWith("https://") || url.startsWith("http://")) {
+              if (url.startsWith("https://") ||
+                  url.startsWith("http://")) {
                 shell.openExternal(url);
               }
 
@@ -132,32 +145,90 @@ jobs:
             win.loadFile(path.join(__dirname, "index.html"));
           }
 
-          app.whenReady().then(() => {
-            createWindow();
+          // Print silently using the Windows default printer.
+          ipcMain.handle("padma:silent-print", async (event) => {
+            return new Promise((resolve) => {
+              const contents = event.sender;
 
-            app.on("activate", () => {
-              if (BrowserWindow.getAllWindows().length === 0) {
-                createWindow();
+              if (contents.isDestroyed()) {
+                resolve({
+                  success: false,
+                  error: "Print window is unavailable"
+                });
+                return;
               }
+
+              contents.print(
+                {
+                  silent: true,
+                  printBackground: true
+                },
+                (success, failureReason) => {
+                  resolve({
+                    success,
+                    error: success ? null : failureReason
+                  });
+                }
+              );
             });
           });
 
+          app.whenReady().then(createWindow);
+
           app.on("window-all-closed", () => {
-            if (process.platform !== "darwin") {
-              app.quit();
+            if (process.platform !== "darwin") app.quit();
+          });
+
+          app.on("activate", () => {
+            if (BrowserWindow.getAllWindows().length === 0) {
+              createWindow();
             }
           });
-          '@ | Set-Content -Path "windows-app/main.cjs" -Encoding utf8
+          '@ | Set-Content -Path windows-app/main.cjs -Encoding UTF8
 
-      - name: Install Electron and build tools
-        working-directory: windows-app
+      - name: Create silent printing preload
+        shell: pwsh
         run: |
-          npm install --save-dev electron electron-builder
+          @'
+          const { contextBridge, ipcRenderer } = require("electron");
 
-      - name: Build Windows EXE
+          contextBridge.exposeInMainWorld("padmaPrint", {
+            print: () => ipcRenderer.invoke("padma:silent-print")
+          });
+
+          // Install print override in the page's main JavaScript world.
+          window.addEventListener("DOMContentLoaded", () => {
+            const script = document.createElement("script");
+
+            script.textContent = `
+              window.print = function() {
+                if (window.padmaPrint) {
+                  window.padmaPrint.print().then(result => {
+                    if (!result || !result.success) {
+                      console.error(
+                        "PADMA silent printing failed:",
+                        result && result.error
+                      );
+                    }
+                  });
+                }
+              };
+            `;
+
+            (document.documentElement || document.head)
+              .appendChild(script);
+
+            script.remove();
+          });
+          '@ | Set-Content -Path windows-app/preload.cjs -Encoding UTF8
+
+      - name: Install Electron dependencies
         working-directory: windows-app
-        run: |
-          npm run build:win
+        run: npm install
+
+      - name: Build PADMA RMS Windows EXE
+        working-directory: windows-app
+        run: npm run dist
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
