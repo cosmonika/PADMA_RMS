@@ -77,8 +77,31 @@ jobs:
       - name: Build push notification JavaScript
         run: npm run build:push
 
+      - name: Verify notification bundle
+        run: |
+          test -f www/padma-push.js
+          echo "Notification bundle OK: $(wc -c < www/padma-push.js) bytes"
+
+      # IMPORTANT: create android BEFORE touching any native files
       - name: Create Android project
         run: npx cap add android
+
+      - name: Inject notification loader into www/index.html
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("www/index.html")
+          html = p.read_text(encoding="utf-8")
+          if "padma-push.js" in html:
+              print("Notification loader already present.")
+          else:
+              if "</body>" in html:
+                  html = html.replace("</body>", '<script defer src="padma-push.js"></script>\n</body>', 1)
+                  p.write_text(html, encoding="utf-8")
+                  print("Notification loader injected.")
+              else:
+                  raise SystemExit("ERROR: </body> not found in www/index.html")
+          PY
 
       - name: Set up permanent Android signing key
         shell: bash
@@ -89,7 +112,6 @@ jobs:
             echo "Using committed permanent PADMA signing key."
           else
             echo "Generating permanent PADMA signing key (first run only)."
-
             keytool -genkeypair \
               -v \
               -keystore padma-debug.keystore \
@@ -106,8 +128,6 @@ jobs:
             git add padma-debug.keystore
             git commit -m "Add permanent signing keystore [skip ci]"
             git push
-
-            echo "Keystore committed to repository."
           fi
 
           cp padma-debug.keystore "$HOME/.android/debug.keystore"
@@ -117,32 +137,44 @@ jobs:
             -alias androiddebugkey \
             -storepass android \
             -keypass android |
-            grep SHA256: |
-            head -1 |
-            sed 's/.*SHA256: //')
+            grep SHA256: | head -1 | sed 's/.*SHA256: //')
 
-          if [ -z "$FINGERPRINT" ]; then
-            echo "Could not obtain signing fingerprint."
-            exit 1
-          fi
+          test -n "$FINGERPRINT" || { echo "Fingerprint failed"; exit 1; }
 
           echo "PADMA_APP_LINK_SHA256=$FINGERPRINT" >> "$GITHUB_ENV"
           echo "## PADMA App Links SHA-256" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "This fingerprint is permanent. Paste it into assetlinks.json:" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "$FINGERPRINT" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "Permanent signing key ready."
 
+      # CRITICAL FIX: WRITE MainActivity *AFTER* cap add android, and use the
+      # path Capacitor actually generated. Find the package dir dynamically.
       - name: Install native Android invoice printing
         shell: bash
         run: |
-          mkdir -p android/app/src/main/java/com/padma/rms
+          set -e
 
-          cat > android/app/src/main/java/com/padma/rms/MainActivity.java <<'JAVA'
-          package com.padma.rms;
+          # Discover where Capacitor placed MainActivity.java
+          EXISTING=$(find android/app/src/main/java -name MainActivity.java | head -1)
+          if [ -z "$EXISTING" ]; then
+            echo "ERROR: Capacitor did not generate MainActivity.java"
+            exit 1
+          fi
+          echo "Capacitor generated: $EXISTING"
+
+          PKG_DIR=$(dirname "$EXISTING")
+          PKG_NAME=$(grep -m1 '^package ' "$EXISTING" | sed 's/package //;s/;//')
+          echo "Package: $PKG_NAME"
+          echo "Package dir: $PKG_DIR"
+
+          if [ "$PKG_NAME" != "com.padma.rms" ]; then
+            echo "WARNING: package is '$PKG_NAME', expected 'com.padma.rms'"
+          fi
+
+          # Replace only the Java body — keep the SAME package as Capacitor generated
+          cat > "$EXISTING" <<JAVA
+          package $PKG_NAME;
 
           import android.content.Context;
           import android.graphics.Color;
@@ -166,9 +198,13 @@ jobs:
 
               @Override
               public void onCreate(Bundle savedInstanceState) {
+                  // super.onCreate MUST run first so bridge.getWebView() exists
                   super.onCreate(savedInstanceState);
 
-                  WebView appWebView = bridge.getWebView();
+                  WebView appWebView = this.bridge.getWebView();
+                  if (appWebView == null) {
+                      return;
+                  }
 
                   appWebView.addJavascriptInterface(
                       new PadmaPrintBridge(this),
@@ -269,7 +305,7 @@ jobs:
           }
           JAVA
 
-          echo "Native Android invoice printing installed."
+          echo "Native Android invoice printing installed at $EXISTING"
 
       - name: Generate Android icons and splash screen
         run: npx capacitor-assets generate --android
@@ -279,42 +315,19 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import re
-
-          gradle_file = Path("android/variables.gradle")
-          if gradle_file.exists():
-              content = gradle_file.read_text()
-              updated, count = re.subn(
-                  r'targetSdkVersion\s*=\s*\d+',
-                  'targetSdkVersion = 34',
-                  content
-              )
-              if count:
-                  gradle_file.write_text(updated)
+          g = Path("android/variables.gradle")
+          if g.exists():
+              c = g.read_text()
+              c2, n = re.subn(r'targetSdkVersion\s*=\s*\d+', 'targetSdkVersion = 34', c)
+              if n:
+                  g.write_text(c2)
                   print("Target SDK configured.")
               else:
                   print("Default target SDK retained.")
-          else:
-              print("Default Android SDK configuration retained.")
           PY
 
-      - name: Sync PADMA RMS files and plugins
-        run: |
-          if ! grep -q "padma-push.js" www/index.html; then
-            python3 - <<'PY'
-          from pathlib import Path
-          p = Path("www/index.html")
-          html = p.read_text(encoding="utf-8")
-          inject = '<script defer src="padma-push.js"></script>\n</body>'
-          if '</body>' in html:
-              html = html.replace('</body>', inject, 1)
-              p.write_text(html, encoding="utf-8")
-              print("Notification loader injected into www/index.html")
-          else:
-              print("WARNING: </body> not found, notification loader not injected")
-          PY
-          fi
-
-          npx cap sync android
+      - name: Sync PADMA RMS plugins
+        run: npx cap sync android
 
       - name: Configure PADMA RMS verified App Links
         shell: bash
@@ -329,18 +342,17 @@ jobs:
 
           tree = ET.parse(manifest)
           root = tree.getroot()
-          application = root.find("application")
-          if application is None:
-              raise SystemExit("Android application element not found.")
+          app = root.find("application")
+          if app is None:
+              raise SystemExit("Application element not found.")
 
           activity = None
-          for item in application.findall("activity"):
-              name = item.get(android + "name", "")
-              if name.endswith("MainActivity"):
+          for item in app.findall("activity"):
+              if item.get(android + "name", "").endswith("MainActivity"):
                   activity = item
                   break
           if activity is None:
-              raise SystemExit("MainActivity not found.")
+              raise SystemExit("MainActivity not found in manifest.")
 
           for existing in list(activity.findall("intent-filter")):
               data = existing.find("data")
@@ -350,8 +362,8 @@ jobs:
           intent = ET.SubElement(activity, "intent-filter")
           intent.set(android + "autoVerify", "true")
 
-          action = ET.SubElement(intent, "action")
-          action.set(android + "name", "android.intent.action.VIEW")
+          a = ET.SubElement(intent, "action")
+          a.set(android + "name", "android.intent.action.VIEW")
 
           c1 = ET.SubElement(intent, "category")
           c1.set(android + "name", "android.intent.category.DEFAULT")
@@ -359,31 +371,28 @@ jobs:
           c2 = ET.SubElement(intent, "category")
           c2.set(android + "name", "android.intent.category.BROWSABLE")
 
-          data = ET.SubElement(intent, "data")
-          data.set(android + "scheme", "https")
-          data.set(android + "host", "padma.cosmonika.com")
+          d = ET.SubElement(intent, "data")
+          d.set(android + "scheme", "https")
+          d.set(android + "host", "padma.cosmonika.com")
 
           tree.write(manifest, encoding="utf-8", xml_declaration=True)
-          print("PADMA RMS verified App Links configured.")
+          print("App Links configured.")
           PY
 
       - name: Verify native printing code
         run: |
-          test -f android/app/src/main/java/com/padma/rms/MainActivity.java
-          grep -q 'PadmaNativePrint' android/app/src/main/java/com/padma/rms/MainActivity.java
-          echo "Android printing bridge found."
+          F=$(find android/app/src/main/java -name MainActivity.java | head -1)
+          test -f "$F"
+          grep -q 'PadmaNativePrint' "$F"
+          grep -q 'extends BridgeActivity' "$F"
+          grep -q 'super.onCreate' "$F"
+          echo "Java bridge OK at $F"
 
       - name: Verify App Links
         run: |
           grep -q 'padma.cosmonika.com' android/app/src/main/AndroidManifest.xml
           grep -q 'autoVerify' android/app/src/main/AndroidManifest.xml
-          echo "PADMA App Links verified in manifest."
-
-      - name: Verify notification bundle
-        run: |
-          test -f www/padma-push.js
-          grep -q 'padma-push.js' www/index.html
-          echo "Notification bundle + loader OK."
+          echo "App Links OK."
 
       - name: Build Android APK
         run: |
