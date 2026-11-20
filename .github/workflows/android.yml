@@ -54,6 +54,7 @@ jobs:
         run: |
           test -f www/index.html
           test -f padma.png
+          test -f padma-icon.png
           test -f google-services.json
           test -f src/push-notifications.js
           echo "All PADMA RMS files found."
