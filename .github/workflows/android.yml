@@ -629,6 +629,32 @@ jobs:
 
           echo "All Android configuration checks passed."
 
+
+
+
+      - name: Restore PADMA signing key and verify fingerprint
+        run: |
+          if [ ! -f padma-debug.keystore ]; then
+            echo "ERROR: padma-debug.keystore is missing from repository root."
+            exit 1
+          fi
+
+          mkdir -p "$HOME/.android"
+          cp padma-debug.keystore "$HOME/.android/debug.keystore"
+
+          FINGERPRINT=$(keytool -list -v \
+            -keystore "$HOME/.android/debug.keystore" \
+            -storepass android \
+            -alias androiddebugkey | \
+            grep "SHA256:" | head -1 | cut -d' ' -f3)
+
+          echo "PADMA App Links SHA-256: $FINGERPRINT"
+          echo "## PADMA App Links SHA-256" >> "$GITHUB_STEP_SUMMARY"
+          echo "$FINGERPRINT" >> "$GITHUB_STEP_SUMMARY"
+
+
+
+
       # --------------------------------------------------
       # 15. BUILD APK
       # --------------------------------------------------
