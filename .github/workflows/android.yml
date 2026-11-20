@@ -355,10 +355,29 @@ jobs:
           PY
 
       # 16. Sync PADMA RMS plugins
-      - name: Sync PADMA RMS files and plugins
-        run: npx cap sync android
+- name: Sync PADMA RMS files and plugins
+  run: |
+    cp src/push-notifications.js www/push-notifications.js
 
+    if ! grep -q "push-notifications.js" www/index.html; then
+      python3 - <<'PY'
+    from pathlib import Path
+    p = Path("www/index.html")
+    html = p.read_text(encoding="utf-8")
+    inject = '<script defer src="push-notifications.js"></script>\n</body>'
+    if '</body>' in html:
+        html = html.replace('</body>', inject, 1)
+        p.write_text(html, encoding="utf-8")
+        print("Notification loader injected into www/index.html")
+    else:
+        print("WARNING: </body> not found, notification loader not injected")
+    PY
+    fi
+
+    npx cap sync android
+    
       # 17. Configure verified Android App Links
+      
       - name: Configure PADMA RMS verified App Links
         shell: bash
         run: |
