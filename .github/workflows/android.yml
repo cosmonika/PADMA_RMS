@@ -503,6 +503,49 @@ jobs:
       - name: Sync PADMA RMS plugins and assets
         run: npx cap sync android
 
+
+
+      # --------------------------------------------------
+      # 13. PREPARE PADMA NOTIFICATION ICONS
+      # --------------------------------------------------
+      - name: Prepare PADMA notification icons
+        run: |
+          mkdir -p android/app/src/main/res/drawable
+
+          python3 - <<'PY'
+          from PIL import Image
+
+          # Full-colour notification logo
+          logo = Image.open("padma.png").convert("RGBA")
+          logo.thumbnail((256, 256))
+          logo.save(
+              "android/app/src/main/res/drawable/padma_notification.png"
+          )
+
+          # White monochrome status-bar icon
+          icon = Image.open("padma-icon.png").convert("RGBA")
+
+          alpha = icon.getchannel("A")
+
+          if alpha.getextrema() == (255, 255):
+              raise SystemExit(
+                  "ERROR: padma-icon.png must have a transparent background."
+              )
+
+          white_icon = Image.new(
+              "RGBA", icon.size, (255, 255, 255, 0)
+          )
+          white_icon.putalpha(alpha)
+          white_icon.thumbnail((96, 96))
+          white_icon.save(
+              "android/app/src/main/res/drawable/ic_stat_padma.png"
+          )
+
+          print("PADMA notification icons generated.")
+          PY
+
+        
+
       # --------------------------------------------------
       # 13. INJECT NOTIFICATIONS INTO ANDROID COPY ONLY
       # --------------------------------------------------
