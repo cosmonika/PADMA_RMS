@@ -8,41 +8,46 @@ on:
       - main
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
-    name: Build Android APK
+    name: Build PADMA RMS
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout repository
+      # --------------------------------------------------
+      # 1. GET PROJECT FILES
+      # --------------------------------------------------
+      - name: Get project files
         uses: actions/checkout@v5
 
-      - name: Setup Node.js
+      - name: Install Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 22
-          cache: npm
 
-      - name: Setup Java
+      - name: Install Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
 
-      - name: Setup Android SDK
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
           packages: platform-tools
           accept-android-sdk-licenses: true
 
-      - name: Install image tools
+      - name: Install Python image library
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-pil
 
-      - name: Install dependencies
+      # --------------------------------------------------
+      # 2. INSTALL DEPENDENCIES
+      # --------------------------------------------------
+      - name: Install project dependencies
         run: npm install
 
       - name: Check required files
@@ -51,174 +56,578 @@ jobs:
           test -f padma.png
           test -f google-services.json
           test -f src/push-notifications.js
+          echo "All PADMA RMS files found."
 
-      - name: Prepare PADMA logo
+      # --------------------------------------------------
+      # 3. PREPARE PADMA LOGO AND SPLASH SCREEN
+      # --------------------------------------------------
+      - name: Prepare app icon and splash screen
         run: |
-          mkdir -p www
+          mkdir -p assets www
+
+          python3 - <<'PY'
+          from PIL import Image
+
+          image = Image.open("padma.png").convert("RGBA")
+
+          icon = Image.new(
+              "RGBA",
+              (1024, 1024),
+              (255, 255, 255, 0)
+          )
+
+          image.thumbnail((900, 900))
+
+          x = (1024 - image.width) // 2
+          y = (1024 - image.height) // 2
+
+          icon.alpha_composite(image, (x, y))
+          icon.save("assets/icon.png")
+
+          logo = Image.open("padma.png").convert("RGBA")
+          logo.thumbnail((1200, 1200))
+
+          splash = Image.new(
+              "RGBA",
+              (2732, 2732),
+              "white"
+          )
+
+          x = (2732 - logo.width) // 2
+          y = (2732 - logo.height) // 2
+
+          splash.alpha_composite(logo, (x, y))
+          splash.convert("RGB").save("assets/splash.png")
+
+          print("PADMA logo and splash prepared.")
+          PY
+
           cp padma.png www/padma.png
 
-      - name: Build push notifications
+      # --------------------------------------------------
+      # 4. BUILD PUSH NOTIFICATIONS
+      # --------------------------------------------------
+      - name: Build push notification JavaScript
         run: npm run build:push
 
+      - name: Verify notification bundle
+        run: |
+          test -f www/padma-push.js
+          echo "Notification bundle OK:"
+          wc -c www/padma-push.js
+
+      # --------------------------------------------------
+      # 5. CREATE ANDROID PROJECT
+      # --------------------------------------------------
       - name: Create Android project
         run: npx cap add android
 
+      # --------------------------------------------------
+      # 6. CONFIGURE FIREBASE
+      # --------------------------------------------------
       - name: Configure Firebase
         run: |
           cp google-services.json android/app/google-services.json
+
           python3 - <<'PY'
           import json
+
           with open("google-services.json") as f:
               data = json.load(f)
+
           package = data["client"][0]["client_info"]["android_client_info"]["package_name"]
+
           if package != "com.padma.rms":
-              raise SystemExit(f"Wrong Firebase package: {package}")
+              raise SystemExit(
+                  f"Wrong Firebase package: {package}"
+              )
+
           print("Firebase package verified:", package)
           PY
 
-      - name: Generate PADMA icons and splash screen
-        run: npx capacitor-assets generate --android
-
-      - name: Configure Android App Links
+      # --------------------------------------------------
+      # 7. PERMANENT ANDROID SIGNING KEY
+      # --------------------------------------------------
+      - name: Set up permanent Android signing key
+        shell: bash
         run: |
-          python3 - <<'PY'
-          import xml.etree.ElementTree as ET
+          set -e
+          mkdir -p "$HOME/.android"
 
-          path = "android/app/src/main/AndroidManifest.xml"
-          ET.register_namespace("android", "http://schemas.android.com/apk/res/android")
-          android = "{http://schemas.android.com/apk/res/android}"
+          if [ -f padma-debug.keystore ]; then
+            echo "Using existing permanent PADMA signing key."
+          else
+            echo "Generating permanent PADMA signing key."
 
-          tree = ET.parse(path)
-          root = tree.getroot()
+            keytool -genkeypair \
+              -v \
+              -keystore padma-debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
 
-          activity = None
-          for item in root.findall(".//activity"):
-              name = item.get(android + "name", "")
-              if name.endswith("MainActivity"):
-                  activity = item
-                  break
+            git config user.name "PADMA Bot"
+            git config user.email "bot@padma.local"
 
-          if activity is None:
-              raise SystemExit("MainActivity not found")
+            git add padma-debug.keystore
+            git commit -m "Add permanent PADMA signing key [skip ci]"
+            git push
+          fi
 
-          intent = ET.SubElement(activity, "intent-filter")
-          intent.set(android + "autoVerify", "true")
-          ET.SubElement(intent, "action", {
-              android + "name": "android.intent.action.VIEW"
-          })
-          ET.SubElement(intent, "category", {
-              android + "name": "android.intent.category.DEFAULT"
-          })
-          ET.SubElement(intent, "category", {
-              android + "name": "android.intent.category.BROWSABLE"
-          })
-          ET.SubElement(intent, "data", {
-              android + "scheme": "https",
-              android + "host": "padma.cosmonika.com"
-          })
+          cp padma-debug.keystore "$HOME/.android/debug.keystore"
 
-          tree.write(path, encoding="utf-8", xml_declaration=True)
-          PY
+          FINGERPRINT=$(keytool -list -v \
+            -keystore padma-debug.keystore \
+            -alias androiddebugkey \
+            -storepass android \
+            -keypass android |
+            grep SHA256: |
+            head -1 |
+            sed 's/.*SHA256: //')
 
-      - name: Configure Android screen bars
+          test -n "$FINGERPRINT"
+
+          echo "PADMA_APP_LINK_SHA256=$FINGERPRINT" >> "$GITHUB_ENV"
+
+          echo "## PADMA App Links SHA-256" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "$FINGERPRINT" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # --------------------------------------------------
+      # 8. INSTALL NATIVE ANDROID INVOICE PRINTING
+      # --------------------------------------------------
+      - name: Install native Android invoice printing
+        shell: bash
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
+          set -e
 
-          base = Path("android/app/src/main/java")
-          matches = list(base.rglob("MainActivity.java"))
-          if not matches:
-              raise SystemExit("MainActivity.java not found")
+          EXISTING=$(find android/app/src/main/java \
+            -name MainActivity.java | head -1)
 
-          path = matches[0]
-          package = "com.padma.rms"
+          if [ -z "$EXISTING" ]; then
+            echo "ERROR: MainActivity.java not found."
+            exit 1
+          fi
 
-          source = f'''package {package};
+          echo "Capacitor generated: $EXISTING"
 
+          PKG_NAME=$(grep -m1 '^package ' "$EXISTING" |
+            sed 's/package //;s/;//')
+
+          if [ "$PKG_NAME" != "com.padma.rms" ]; then
+            echo "ERROR: Unexpected package: $PKG_NAME"
+            exit 1
+          fi
+
+          cat > "$EXISTING" <<JAVA
+          package $PKG_NAME;
+
+          import android.content.Context;
+          import android.graphics.Color;
           import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.print.PrintAttributes;
+          import android.print.PrintManager;
           import android.webkit.JavascriptInterface;
           import android.webkit.WebView;
           import android.webkit.WebViewClient;
-          import android.print.PrintManager;
-          import android.print.PrintDocumentAdapter;
-          import android.content.Context;
+
           import com.getcapacitor.BridgeActivity;
 
-          public class MainActivity extends BridgeActivity {{
+          import java.util.ArrayList;
+          import java.util.List;
+
+          public class MainActivity extends BridgeActivity {
+
+              private final List<WebView> printViews = new ArrayList<>();
 
               @Override
-              public void onCreate(Bundle savedInstanceState) {{
+              public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
 
-                  getWindow().setStatusBarColor(android.graphics.Color.BLACK);
-                  getWindow().setNavigationBarColor(android.graphics.Color.BLACK);
+                  WebView appWebView = this.bridge.getWebView();
 
-                  getBridge().getWebView().addJavascriptInterface(
-                      new Object() {{
-                          @JavascriptInterface
-                          public void print(String html) {{
-                              runOnUiThread(() -> {{
-                                  WebView printView = new WebView(MainActivity.this);
-                                  printView.setWebViewClient(new WebViewClient() {{
-                                      @Override
-                                      public void onPageFinished(WebView view, String url) {{
-                                          PrintManager manager = (PrintManager)
-                                              getSystemService(Context.PRINT_SERVICE);
-                                          PrintDocumentAdapter adapter =
-                                              view.createPrintDocumentAdapter("PADMA RMS Bill");
-                                          manager.print("PADMA RMS Bill", adapter,
-                                              new android.print.PrintAttributes.Builder().build());
-                                      }}
-                                  }});
-                                  printView.loadDataWithBaseURL(
-                                      null, html, "text/html", "UTF-8", null
-                                  );
-                              }});
-                          }}
-                      }},
+                  if (appWebView == null) {
+                      return;
+                  }
+
+                  appWebView.addJavascriptInterface(
+                      new PadmaPrintBridge(this),
                       "PadmaNativePrint"
                   );
-              }}
-          }}
-          '''
-          path.write_text(source)
-          print("Configured:", path)
-          PY
 
-      - name: Configure Android SDK target
+                  installPrintHook(appWebView, 0);
+              }
+
+              private void installPrintHook(WebView webView, int attempt) {
+                  if (attempt >= 40) return;
+
+                  String script =
+                      "(function() {" +
+                      " if (document.readyState !== 'complete') return;" +
+                      " if (window.__padmaPrintHookInstalled) return;" +
+                      " if (!window.PadmaNativePrint) return;" +
+                      " window.__padmaPrintHookInstalled = true;" +
+                      " window.open = function() {" +
+                      "   var html = '';" +
+                      "   var printed = false;" +
+                      "   return {" +
+                      "     document: {" +
+                      "       write: function(content) { html += String(content); }," +
+                      "       close: function() {}" +
+                      "     }," +
+                      "     print: function() {" +
+                      "       if (printed || !html) return;" +
+                      "       printed = true;" +
+                      "       var match = html.match(/<title>([\\\\s\\\\S]*?)<\\\\/title>/i);" +
+                      "       var title = match ? match[1] : 'PADMA Invoice';" +
+                      "       window.PadmaNativePrint.printHtml(html, title);" +
+                      "     }" +
+                      "   };" +
+                      " };" +
+                      "})();";
+
+                  webView.evaluateJavascript(script, null);
+
+                  new Handler(Looper.getMainLooper()).postDelayed(
+                      () -> installPrintHook(webView, attempt + 1),
+                      300
+                  );
+              }
+
+              private class PadmaPrintBridge {
+                  private final Context context;
+
+                  PadmaPrintBridge(Context context) {
+                      this.context = context;
+                  }
+
+                  @JavascriptInterface
+                  public void printHtml(String html, String title) {
+                      if (html == null || html.isEmpty()) return;
+
+                      new Handler(Looper.getMainLooper()).post(() -> {
+                          WebView printWebView = new WebView(context);
+
+                          printWebView.setBackgroundColor(Color.WHITE);
+                          printWebView.getSettings().setJavaScriptEnabled(false);
+
+                          printViews.add(printWebView);
+
+                          printWebView.setWebViewClient(new WebViewClient() {
+                              private boolean started = false;
+
+                              @Override
+                              public void onPageFinished(WebView view, String url) {
+                                  if (started) return;
+                                  started = true;
+
+                                  PrintManager printManager =
+                                      (PrintManager) getSystemService(
+                                          Context.PRINT_SERVICE
+                                      );
+
+                                  if (printManager == null) return;
+
+                                  String safeTitle =
+                                      (title == null || title.trim().isEmpty())
+                                      ? "PADMA Invoice"
+                                      : title.replaceAll(
+                                          "[^a-zA-Z0-9_-]", "_"
+                                      );
+
+                                  android.print.PrintDocumentAdapter adapter =
+                                      view.createPrintDocumentAdapter(safeTitle);
+
+                                  PrintAttributes attributes =
+                                      new PrintAttributes.Builder()
+                                          .setMediaSize(
+                                              PrintAttributes.MediaSize.ISO_A4
+                                          )
+                                          .setResolution(
+                                              new PrintAttributes.Resolution(
+                                                  "padma",
+                                                  "PADMA RMS",
+                                                  300,
+                                                  300
+                                              )
+                                          )
+                                          .setMinMargins(
+                                              PrintAttributes.Margins.NO_MARGINS
+                                          )
+                                          .build();
+
+                                  printManager.print(
+                                      safeTitle,
+                                      adapter,
+                                      attributes
+                                  );
+                              }
+                          });
+
+                          printWebView.loadDataWithBaseURL(
+                              null,
+                              html,
+                              "text/html",
+                              "UTF-8",
+                              null
+                          );
+                      });
+                  }
+              }
+          }
+          JAVA
+
+          echo "Native invoice printing installed."
+
+      # --------------------------------------------------
+      # 9. GENERATE APP ICONS AND SPLASH
+      # --------------------------------------------------
+      - name: Generate Android icons and splash screen
+        run: npx capacitor-assets generate --android
+
+      # --------------------------------------------------
+      # 10. CONFIGURE ANDROID SDK
+      # --------------------------------------------------
+      - name: Configure Android SDK
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import re
 
-          files = [
-              Path("android/variables.gradle"),
-              Path("android/app/build.gradle")
-          ]
+          g = Path("android/variables.gradle")
 
-          for path in files:
-              if not path.exists():
-                  continue
-              text = path.read_text()
-              text = re.sub(r'targetSdkVersion\s*=\s*\d+',
-                            'targetSdkVersion = 34', text)
-              text = re.sub(r'targetSdkVersion\s+\d+',
-                            'targetSdkVersion 34', text)
-              path.write_text(text)
+          if g.exists():
+              content = g.read_text()
+
+              updated, count = re.subn(
+                  r'targetSdkVersion\s*=\s*\d+',
+                  'targetSdkVersion = 34',
+                  content
+              )
+
+              if count:
+                  g.write_text(updated)
+                  print("Target SDK configured to 34.")
+              else:
+                  print("Target SDK declaration not changed.")
           PY
 
-      - name: Sync Capacitor
+      # --------------------------------------------------
+      # 11. CONFIGURE VERIFIED APP LINKS
+      # --------------------------------------------------
+      - name: Configure PADMA App Links
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          manifest = Path(
+              "android/app/src/main/AndroidManifest.xml"
+          )
+
+          ET.register_namespace(
+              "android",
+              "http://schemas.android.com/apk/res/android"
+          )
+
+          android = "{http://schemas.android.com/apk/res/android}"
+
+          tree = ET.parse(manifest)
+          root = tree.getroot()
+
+          app = root.find("application")
+
+          if app is None:
+              raise SystemExit("Application element not found.")
+
+          activity = None
+
+          for item in app.findall("activity"):
+              if item.get(android + "name", "").endswith("MainActivity"):
+                  activity = item
+                  break
+
+          if activity is None:
+              raise SystemExit("MainActivity not found.")
+
+          # Remove old filters for this domain to prevent duplicates.
+          for existing in list(activity.findall("intent-filter")):
+              data_elements = existing.findall("data")
+
+              if any(
+                  data.get(android + "host") == "padma.cosmonika.com"
+                  for data in data_elements
+              ):
+                  activity.remove(existing)
+
+          intent = ET.SubElement(activity, "intent-filter")
+          intent.set(android + "autoVerify", "true")
+
+          ET.SubElement(intent, "action", {
+              android + "name": "android.intent.action.VIEW"
+          })
+
+          ET.SubElement(intent, "category", {
+              android + "name": "android.intent.category.DEFAULT"
+          })
+
+          ET.SubElement(intent, "category", {
+              android + "name": "android.intent.category.BROWSABLE"
+          })
+
+          ET.SubElement(intent, "data", {
+              android + "scheme": "https",
+              android + "host": "padma.cosmonika.com"
+          })
+
+          tree.write(
+              manifest,
+              encoding="utf-8",
+              xml_declaration=True
+          )
+
+          print("PADMA App Links configured.")
+          PY
+
+      # --------------------------------------------------
+      # 12. SYNC CAPACITOR
+      # --------------------------------------------------
+      - name: Sync PADMA RMS plugins and assets
         run: npx cap sync android
 
-      - name: Build APK
-        working-directory: android
+      # --------------------------------------------------
+      # 13. INJECT NOTIFICATIONS INTO ANDROID COPY ONLY
+      # --------------------------------------------------
+      # IMPORTANT:
+      # Never modify www/index.html.
+      # Inject only into the generated Android asset copy.
+      # This prevents JavaScript strings containing </body>
+      # from being accidentally modified.
+      - name: Inject notification loader into Android assets only
         run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path(
+              "android/app/src/main/assets/public/index.html"
+          )
+
+          js = Path(
+              "android/app/src/main/assets/public/padma-push.js"
+          )
+
+          if not p.exists():
+              raise SystemExit("Android index.html not found.")
+
+          if not js.exists():
+              raise SystemExit("Android padma-push.js not found.")
+
+          html = p.read_text(encoding="utf-8")
+
+          if "padma-push.js" in html:
+              print("Notification loader already present.")
+          else:
+              marker = "</body>"
+
+              if marker not in html:
+                  raise SystemExit(
+                      "Closing body tag not found in Android copy."
+                  )
+
+              before, after = html.rsplit(marker, 1)
+
+              html = (
+                  before
+                  + '<script defer src="padma-push.js"></script>\n'
+                  + marker
+                  + after
+              )
+
+              p.write_text(html, encoding="utf-8")
+
+              print("Notification loader injected into Android copy.")
+
+          # Ensure original source was not modified by this workflow.
+          print("Original www/index.html was not modified.")
+          PY
+
+      # --------------------------------------------------
+      # 14. VERIFY ANDROID BUILD FILES
+      # --------------------------------------------------
+      - name: Verify Android configuration
+        run: |
+          set -e
+
+          JAVA_FILE=$(find android/app/src/main/java \
+            -name MainActivity.java | head -1)
+
+          test -f "$JAVA_FILE"
+
+          grep -q 'PadmaNativePrint' "$JAVA_FILE"
+          grep -q 'extends BridgeActivity' "$JAVA_FILE"
+          grep -q 'super.onCreate' "$JAVA_FILE"
+
+          grep -q 'padma.cosmonika.com' \
+            android/app/src/main/AndroidManifest.xml
+
+          grep -q 'autoVerify' \
+            android/app/src/main/AndroidManifest.xml
+
+          test -f android/app/google-services.json
+
+          test -f android/app/src/main/assets/public/index.html
+          test -f android/app/src/main/assets/public/padma-push.js
+
+          echo "All Android configuration checks passed."
+
+      # --------------------------------------------------
+      # 15. BUILD APK
+      # --------------------------------------------------
+      - name: Build Android APK
+        run: |
+          cd android
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon
 
+      # --------------------------------------------------
+      # 16. VERIFY APK
+      # --------------------------------------------------
+      - name: Verify generated APK
+        run: |
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+
+          test -f "$APK"
+
+          ls -lh "$APK"
+
+          echo "PADMA RMS APK successfully generated."
+
+      # --------------------------------------------------
+      # 17. UPLOAD APK
+      # --------------------------------------------------
       - name: Upload PADMA RMS APK
         uses: actions/upload-artifact@v4
         with:
           name: PADMA-RMS-Android-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          retention-days: 14
+
+      # --------------------------------------------------
+      # 18. BACKUP SIGNING KEY
+      # --------------------------------------------------
+      - name: Save permanent App Links signing key
+        uses: actions/upload-artifact@v4
+        with:
+          name: PADMA-App-Link-Signing-Key
+          path: padma-debug.keystore
+          if-no-files-found: error
+          retention-days: 90
