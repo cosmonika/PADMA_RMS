@@ -1,19 +1,23 @@
+
 {
   "name": "padma-rms-android",
-  "version": "1.0.0",
+  "version": "1.09.02",
   "private": true,
   "description": "PADMA RMS Android application",
   "scripts": {
     "build": "cap sync android",
-    "build:push": "echo \"push build skipped (local notifications used)\""
+    "build:push": "esbuild src/push-notifications.js --bundle --format=iife --target=es2020 --outfile=www/padma-push.js"
   },
   "dependencies": {
     "@capacitor/android": "^7.4.3",
     "@capacitor/core": "^7.4.3",
+    "@capacitor/push-notifications": "^7.0.0",
     "@capacitor/local-notifications": "^7.0.0"
   },
   "devDependencies": {
     "@capacitor/cli": "^7.4.3",
-    "@capacitor/assets": "^3.0.5"
+    "@capacitor/assets": "^3.0.5",
+    "esbuild": "^0.25.0"
   }
 }
+
