@@ -369,9 +369,82 @@ jobs:
           npx cap sync android
 
       # 16. Configure verified Android App Links
-      - name: Sync PADMA RMS files and plugins
-  run: npx cap sync android
-  
+      - name: Configure PADMA RMS verified App Links
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+
+          ET.register_namespace(
+              "android",
+              "http://schemas.android.com/apk/res/android"
+          )
+
+          android = "{http://schemas.android.com/apk/res/android}"
+
+          tree = ET.parse(manifest)
+          root = tree.getroot()
+
+          application = root.find("application")
+
+          if application is None:
+              raise SystemExit("Android application element not found.")
+
+          activity = None
+
+          for item in application.findall("activity"):
+              name = item.get(android + "name", "")
+
+              if name.endswith("MainActivity"):
+                  activity = item
+                  break
+
+          if activity is None:
+              raise SystemExit("MainActivity not found.")
+
+          # Prevent duplicate intent-filter on rebuilds
+          for existing in list(activity.findall("intent-filter")):
+              data = existing.find("data")
+              if data is not None and data.get(android + "host") == "padma.cosmonika.com":
+                  activity.remove(existing)
+
+          intent = ET.SubElement(activity, "intent-filter")
+          intent.set(android + "autoVerify", "true")
+
+          action = ET.SubElement(intent, "action")
+          action.set(
+              android + "name",
+              "android.intent.action.VIEW"
+          )
+
+          category1 = ET.SubElement(intent, "category")
+          category1.set(
+              android + "name",
+              "android.intent.category.DEFAULT"
+          )
+
+          category2 = ET.SubElement(intent, "category")
+          category2.set(
+              android + "name",
+              "android.intent.category.BROWSABLE"
+          )
+
+          data = ET.SubElement(intent, "data")
+          data.set(android + "scheme", "https")
+          data.set(android + "host", "padma.cosmonika.com")
+
+          tree.write(
+              manifest,
+              encoding="utf-8",
+              xml_declaration=True
+          )
+
+          print("PADMA RMS verified App Links configured.")
+          PY
+
       # 17. Verify native printing
       - name: Verify native printing code
         run: |
