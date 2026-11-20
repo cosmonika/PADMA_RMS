@@ -506,24 +506,18 @@ jobs:
 
 
 
+     
       # --------------------------------------------------
-      # 13. PREPARE PADMA NOTIFICATION ICONS
+      # 13. PREPARE PADMA MONOCHROME NOTIFICATION ICON
       # --------------------------------------------------
-      - name: Prepare PADMA notification icons
+      - name: Prepare PADMA notification icon
         run: |
           mkdir -p android/app/src/main/res/drawable
 
           python3 - <<'PY'
           from PIL import Image
 
-          # Full-colour notification logo
-          logo = Image.open("padma.png").convert("RGBA")
-          logo.thumbnail((256, 256))
-          logo.save(
-              "android/app/src/main/res/drawable/padma_notification.png"
-          )
-
-          # White monochrome status-bar icon
+          # Load the transparent PADMA monochrome icon
           icon = Image.open("padma-icon.png").convert("RGBA")
 
           alpha = icon.getchannel("A")
@@ -533,16 +527,19 @@ jobs:
                   "ERROR: padma-icon.png must have a transparent background."
               )
 
+          # Create a pure white symbol with transparent background
           white_icon = Image.new(
               "RGBA", icon.size, (255, 255, 255, 0)
           )
           white_icon.putalpha(alpha)
+
           white_icon.thumbnail((96, 96))
+
           white_icon.save(
               "android/app/src/main/res/drawable/ic_stat_padma.png"
           )
 
-          print("PADMA notification icons generated.")
+          print("PADMA monochrome notification icon generated.")
           PY
 
         
