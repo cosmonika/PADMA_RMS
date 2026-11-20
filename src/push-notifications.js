@@ -29,10 +29,15 @@
 
   // ---- Permission ----
   async function ensurePermission() {
-    const perm = await LN.checkPermissions();
-    if (perm.display === 'granted') return true;
-    const req = await LN.requestPermissions();
-    return req.display === 'granted';
+    try {
+      const perm = await LN.checkPermissions();
+      if (perm.display === 'granted') return true;
+      const req = await LN.requestPermissions();
+      return req.display === 'granted';
+    } catch (e) {
+      console.warn('[notify] permission check failed:', e.message);
+      return false;
+    }
   }
 
   // ---- Track which events we've already notified ----
@@ -56,6 +61,26 @@
     return !s[id];
   }
 
+  // Convert a string to a stable positive 31-bit integer (Android notification id)
+  function hashId(str) {
+    let h = 0;
+    for (let i = 0; i < str.length; i++) {
+      h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+    }
+    // Force into [1 .. 2^31-1] — Android rejects ids outside signed-int32
+    return (h & 0x7fffffff) || 1;
+  }
+
+  // Small util (mirrors the one in index.html, safe to duplicate here)
+  function money(n) {
+    const num = Number(n || 0);
+    const sym = (window.Store && Store.data && Store.data.shop && Store.data.shop.currencySymbol) || '₹';
+    return sym + num.toLocaleString('en-IN', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+  }
+
   // ---- Notify one alert ----
   async function notify(id, title, body, data) {
     try {
@@ -66,11 +91,9 @@
           body: body,
           smallIcon: 'ic_stat_icon_config_sample',
           iconColor: '#6366f1',
-          sound: null,
           schedule: { at: new Date(Date.now() + 100) },
           extra: data || {},
           channelId: 'padma_default',
-          // Android channel is created below
         }],
       });
     } catch (e) {
@@ -149,22 +172,6 @@
       );
     });
     if (overdue.length) markSeen('tasks', overdue.map(t => t.id));
-  }
-
-  // Convert a string to a stable positive 32-bit integer (Android notification id)
-  function hashId(str) {
-    let h = 0;
-    for (let i = 0; i < str.length; i++) {
-      h = ((h << 5) - h + str.charCodeAt(i)) | 0;
-    }
-    return Math.abs(h) || 1;
-  }
-
-  // Small util (mirrors the one in index.html, safe to duplicate here)
-  function money(n) {
-    const num = Number(n || 0);
-    const sym = (window.Store && Store.data.shop && Store.data.shop.currencySymbol) || '₹';
-    return sym + num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
   // ---- Handle taps ----
