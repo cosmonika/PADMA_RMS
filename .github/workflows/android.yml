@@ -53,7 +53,6 @@ jobs:
         run: |
           test -f www/index.html
           test -f padma.png
-          test -f google-services.json
           test -f src/push-notifications.js
           echo "PADMA RMS files found."
 
@@ -316,18 +315,11 @@ jobs:
 
           echo "Native Android invoice printing installed."
 
-      # 13. Copy Firebase Android configuration
-      - name: Copy Firebase Android configuration
-        run: |
-          mkdir -p android/app
-          cp google-services.json android/app/google-services.json
-          test -f android/app/google-services.json
-
-      # 14. Generate Android icons and splash screen
+      # 13. Generate Android icons and splash screen
       - name: Generate Android icons and splash screen
         run: npx capacitor-assets generate --android
 
-      # 15. Configure Android SDK
+      # 14. Configure Android SDK
       - name: Configure Android SDK
         run: |
           python3 - <<'PY'
@@ -354,30 +346,29 @@ jobs:
               print("Default Android SDK configuration retained.")
           PY
 
-      # 16. Sync PADMA RMS plugins
-- name: Sync PADMA RMS files and plugins
-  run: |
-    cp src/push-notifications.js www/push-notifications.js
+      # 15. Sync PADMA RMS plugins and inject notification loader
+      - name: Sync PADMA RMS files and plugins
+        run: |
+          cp src/push-notifications.js www/push-notifications.js
 
-    if ! grep -q "push-notifications.js" www/index.html; then
-      python3 - <<'PY'
-    from pathlib import Path
-    p = Path("www/index.html")
-    html = p.read_text(encoding="utf-8")
-    inject = '<script defer src="push-notifications.js"></script>\n</body>'
-    if '</body>' in html:
-        html = html.replace('</body>', inject, 1)
-        p.write_text(html, encoding="utf-8")
-        print("Notification loader injected into www/index.html")
-    else:
-        print("WARNING: </body> not found, notification loader not injected")
-    PY
-    fi
+          if ! grep -q "push-notifications.js" www/index.html; then
+            python3 - <<'PY'
+          from pathlib import Path
+          p = Path("www/index.html")
+          html = p.read_text(encoding="utf-8")
+          inject = '<script defer src="push-notifications.js"></script>\n</body>'
+          if '</body>' in html:
+              html = html.replace('</body>', inject, 1)
+              p.write_text(html, encoding="utf-8")
+              print("Notification loader injected into www/index.html")
+          else:
+              print("WARNING: </body> not found, notification loader not injected")
+          PY
+          fi
 
-    npx cap sync android
-    
-      # 17. Configure verified Android App Links
-      
+          npx cap sync android
+
+      # 16. Configure verified Android App Links
       - name: Configure PADMA RMS verified App Links
         shell: bash
         run: |
@@ -414,6 +405,12 @@ jobs:
           if activity is None:
               raise SystemExit("MainActivity not found.")
 
+          # Prevent duplicate intent-filter on rebuilds
+          for existing in list(activity.findall("intent-filter")):
+              data = existing.find("data")
+              if data is not None and data.get(android + "host") == "padma.cosmonika.com":
+                  activity.remove(existing)
+
           intent = ET.SubElement(activity, "intent-filter")
           intent.set(android + "autoVerify", "true")
 
@@ -448,35 +445,28 @@ jobs:
           print("PADMA RMS verified App Links configured.")
           PY
 
-      # 18. Verify Firebase configuration
-      - name: Verify Firebase configuration
-        run: |
-          test -f android/app/google-services.json
-          grep -q '"package_name": "com.padma.rms"' android/app/google-services.json
-          echo "Firebase package name verified."
-
-      # 19. Verify native printing
+      # 17. Verify native printing
       - name: Verify native printing code
         run: |
           test -f android/app/src/main/java/com/padma/rms/MainActivity.java
           grep -q 'PadmaNativePrint' android/app/src/main/java/com/padma/rms/MainActivity.java
           echo "Android printing bridge found."
 
-      # 20. Verify App Links
+      # 18. Verify App Links
       - name: Verify Android App Links
         run: |
           grep -q 'padma.cosmonika.com' android/app/src/main/AndroidManifest.xml
           grep -q 'autoVerify' android/app/src/main/AndroidManifest.xml
           echo "PADMA App Links verified in manifest."
 
-      # 21. Build Android APK
+      # 19. Build Android APK
       - name: Build Android APK
         run: |
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon
 
-      # 22. Upload APK
+      # 20. Upload APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
@@ -485,7 +475,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # 23. Save signing key for future builds
+      # 21. Save signing key for future builds
       - name: Save permanent App Links signing key
         uses: actions/upload-artifact@v4
         with:
